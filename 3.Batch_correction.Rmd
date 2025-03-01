@@ -1,0 +1,395 @@
+---
+title: "P513-4 : Dysregulated asthmatic epithelial interferon responses to viruses drive exacerbation, T2 inflammation, and airway remodeling | Combine Batch 1 and 2 with this Batch 4"
+output: 
+  html_document:
+    toc: yes
+    toc_float:
+      collapsed: no
+  pdf_document:
+    toc: yes
+editor_options:
+  chunk_output_type: console
+header-includes:
+  \usepackage{float}
+---
+
+<style type="text/css">
+body{ /* Normal  */
+      font-size: 14px;
+  }
+h1 { /* Header 1 */
+  font-size: 28px;
+}
+h2 { /* Header 2 */
+    font-size: 24px;
+}
+h3 { /* Header 3 */
+  font-size: 20px;
+}
+h4 { /* Header 4 */
+  font-size: 16px;
+}
+</style>
+
+```{r include=FALSE}
+knitr::opts_chunk$set(fig.height=8.5, fig.width = 8.5, echo=FALSE,message=FALSE, warning=FALSE)
+```
+
+# Project Summary
+
+How does the interferon response change post baseline and baseline post rhinovirus infection, and in particular the kinetics, how does it relate to viral clearance, patient history.
+
+
+The primary questions are: 
+How do type 1 and 2 interferon responses on the level of the interferon relate back to host characteristics.
+
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE}
+library(knitr)
+library(tidyverse)
+
+library(ggthemes)
+#library(edgeR)
+library(RColorBrewer)
+library(kableExtra)
+library(viridis)
+library(ggbeeswarm)
+library(gplots)
+library(upstartr)
+library(janitor)
+library(cowplot)
+library(edgeR)
+library(ggpubr)
+
+library(ComplexHeatmap)
+library(limma)
+library(data.table)
+library(multcomp)
+
+library(bRi)
+library(miscHelpers)
+library(RNAseQC)
+library(countSubsetNorm)
+library(apird)
+
+
+library(randomcoloR)
+library(dendextend)
+library(corrplot)
+library(patchwork)
+#library(ggsankey)
+# Change package priority to dplyr, not a great way to do it but works for(if it aint broke dont fix it)
+select <- dplyr::select
+rename <- dplyr::rename
+filter <- dplyr::filter
+distinct <- dplyr::distinct
+mutate <- dplyr::mutate
+
+
+opts_chunk$set(
+  fig.width=6, fig.height=4.25, cache = TRUE,
+  echo=FALSE, warning=FALSE, message=FALSE)
+options(stringsAsFactors = FALSE)
+
+theme_set(
+  theme_bw(20) +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_rect(colour="black", fill = NA, size = 1),
+          axis.text = element_text(colour="black"),
+          axis.ticks = element_line(colour="black"),
+          axis.text.x = element_text(angle=0)))
+update_geom_defaults("point", list(shape=16))
+grDevices::pdf.options(useDingbats = FALSE)
+options(ggrepel.max.overlaps = Inf)
+#Create 'not in' operator
+`%notin%` <- Negate(`%in%`)
+# test_plot <- ggplot2::ggplot(mapping = ggplot2::aes(x = 1:10, y = 1:10)) + ggplot2::geom_point()
+# ggplot(mapping = aes(x = 1:10, y = 1:10)) + geom_point()
+
+col.vec <- c(
+  "none" = "#969696",
+  "percent aligned" = "#CC79A7",
+  "CV coverage, percent aligned" = "steelblue3",
+  
+  "total seqs, percent aligned" = "#feb24c",
+  
+  "CV coverage, total seqs, percent aligned" = "#fc4e2a",
+  "total seqs" = "darkolivegreen",
+  "CV coverage, total seqs" = "aquamarine"
+  )
+
+IFN_treatment_col <- c("None" = "grey60", 
+                       "CXCL10" = "mediumorchid", 
+                       "IFNb" = "darkorange3")
+
+virus_col <- c("None" = "steelblue", 
+               "RV16" = "red")
+
+Treatment_col <- c("None + None" = "grey60", 
+                   "None + RV16" = "red", 
+                   "CXCL10 + RV16" = "mediumpurple4",  # Blend of mediumorchid + firebrick
+                   "IFNb + RV16" = "darkred") 
+ rasterResolutionDpi <- 300
+ 
+ 
+ clean_column_names <- function(col_names) {
+  col_names %>%
+    str_replace_all("\\.\\.\\.+", "_") %>%  # Replace multiple dots with a single underscore
+    str_replace_all("\\.", "_") %>%         # Replace remaining dots with underscores
+    str_replace_all("_$", "") %>%           # Remove trailing underscores
+    str_replace_all("__+", "_") %>%         # Remove double underscores
+    str_replace_all("\\s+", "_") %>%        # Replace spaces with underscores
+    str_replace_all("[^A-Za-z0-9_]", "")    # Remove any remaining special characters
+}
+```
+
+
+```{r setFilenamesAndGlobalVariables}
+projectNumber <- "P513-4"
+dirBoxBase <- 
+  file.path("~", "Library", "CloudStorage", "Box-Box")
+dirRoot <-
+  file.path(
+    dirBoxBase, "Altman_Lab", # Box version
+    # "~", "Documents", "Projects_local", # local version
+    projectNumber)
+dirPlots <- file.path("Figs")
+dirresults <- file.path("Results")
+dirDataclean <- file.path("Data_clean")
+dirDataraw <- file.path("Data_raw")
+
+
+
+```
+
+# 1. Load in data
+
+```{r}
+dat.voom <- readRDS("Data_clean/P513-4_voom_normalized.RData")
+#metadata for batch 4
+design_batch_4<-dat.voom$targets %>% select(libid,donorId,sample_id,timePoint,viral_load,log10viral_load,studyGroup,Treatment,project,Exacerbation) 
+#Get the raw counts for Batch 4
+counts_raw_batch_4 <- read_csv("Data_raw/counts_raw.csv") %>% relocate(c(geneName,dat.voom$targets$libid))
+
+
+#load batch 1 and 2 data
+load("~/Library/CloudStorage/Box-Box/Altman_Lab/P513-2/Data_clean/P513-2_voom_normalized_sep_combined_w_batch2.RData")
+
+design_batch_1_2 <- dat.voom_combined_w_batch2$targets %>% select(libid,donorId,sample_id,timePoint,viral_load,log10viral_load,studyGroup,treat_infection,exacerbation,project) %>% mutate(Treatment = treat_infection) %>% 
+  mutate(Exacerbation = ifelse(studyGroup == "Healthy","Healthy",ifelse(exacerbation == "Severe_EX","Severe Exacerbation","No Severe Exacerbation"))) %>% 
+  mutate(Exacerbation = factor(Exacerbation,levels=c("Healthy","No Severe Exacerbation","Severe Exacerbation"))) %>% select(-c(treat_infection,exacerbation)) %>% subset(Treatment %notin% c("IL-13_RV16","IL-13_No_Infection"))
+counts_raw_batch_1 <- read_csv("~/Library/CloudStorage/Box-Box/Altman_Lab/P513-2/Data_raw/counts_raw_1.csv") 
+counts_raw_batch_2 <- read_csv("~/Library/CloudStorage/Box-Box/Altman_Lab/P513-2/Data_raw/counts_raw.csv") 
+counts_raw_comb_1_2 <- left_join(counts_raw_batch_1,counts_raw_batch_2,by = join_by(geneName)) %>% select(geneName,design_batch_1_2$libid)
+
+counts_raw <- left_join(counts_raw_comb_1_2,counts_raw_batch_4)
+design <- rbind(design_batch_1_2,design_batch_4) %>% mutate(timePoint = ifelse(Treatment == "None + None","Control",timePoint)) 
+```
+
+
+## 2.1 Load key.
+## 2.2 Filter gene key to protein coding (pc) genes that occur in the count data set and have valid hgnc symbols. 
+```{r key, message=FALSE}
+
+if(file.exists(file.path(dirDataraw,"key_pc.csv"))){
+  key.pc <- read_csv("Data_raw/key_pc.csv")
+} else {
+  library(biomaRt)
+  ensembl <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl")
+  full_key <- biomaRt::getBM(attributes = c("ensembl_gene_id","hgnc_symbol",	
+                                "transcript_biotype"), mart = ensembl) %>% 
+              #rename variable to match count data
+              dplyr::rename(geneName = ensembl_gene_id,gene_biotype = transcript_biotype) 
+  
+  key.pc <- full_key %>% 
+    # Keep only valid hgnc symbols
+    filter(!is.na(hgnc_symbol)) %>% 
+    # Keep protein coding genes only
+    filter(gene_biotype == "protein_coding") %>% 
+    # Remove duplicate entries
+    distinct(geneName, .keep_all=TRUE) %>% 
+    # Keep only genes found in dataset
+    filter(geneName %in% counts_raw$geneName) %>% 
+    arrange(geneName)
+  
+  write_csv(key.pc,"Data_raw/key_pc.csv")
+}
+```
+
+
+## 2.3 Filter counts to protien coding genes
+```{r}
+counts.pc <- counts_raw %>% 
+  filter(geneName %in% key.pc$geneName) %>% 
+  arrange(geneName)
+```
+
+
+
+# 4. Create DGEList object
+
+```{r dgelist}
+
+
+fileName<- file.path(dirDataclean, paste(projectNumber,"_dat_clean_unnormalized_Batch_1_2_4.RDS",sep=""))
+if(file.exists(fileName)){
+  dat.pc_batch_1_2_4 <- readRDS(fileName)
+} else {
+  dat.pc_batch_1_2_4 <- DGEList(
+  #count table. move gene names to column names
+  counts=as.matrix(column_to_rownames(counts.pc,
+                                      "geneName")),
+  #metadata
+  samples=design %>% arrange(libid),
+  #keep genes in count table
+  genes=key.pc)
+  saveRDS(dat.pc_batch_1_2_4, fileName)
+}
+```
+
+# 5. Rare gene filtering
+The raw gene sets contain highly variable, low abundance/rare genes. 
+
+
+
+## Threshold for filtering : 
+  Present in minimum sample = 8 
+  minimum CPM = 0.8
+
+```{r}
+source("~/Library/CloudStorage/Box-Box/Bioinformatics_R_scripts/filter_rare.R")
+dat.pc_batch_1_2_4.abund<-filter_rare(dat = dat.pc_batch_1_2_4, min.pct = 10,min.CPM = 0.3,gene.var = "geneName",plot = TRUE)
+```
+
+
+
+# 6. Normalize the data
+
+## 6.1 Calculate factors to scale library sizes.
+
+```{r norm}
+dat.pc_batch_1_2_4.abund.norm <- calcNormFactors(dat.pc_batch_1_2_4.abund)
+```
+
+
+
+
+
+
+## 6.2 Normalize with voom
+
+```{r voom3}
+
+fileName<- file.path(dirDataclean, paste(projectNumber,"_dat_pc_abund_norm_voom_Batch_1_2_4.RDS",sep=""))
+if(file.exists(fileName)){
+  dat.pc_batch_1_2_4.abund.norm.voom <- readRDS(fileName)
+} else {
+ dat.pc_batch_1_2_4.abund.norm.voom <- voom(
+                          dat.pc_batch_1_2_4.abund.norm,
+                          design=model.matrix(~Treatment,
+                                 data=dat.pc_batch_1_2_4.abund.norm$samples),
+                          plot=TRUE)
+  saveRDS(dat.pc_batch_1_2_4.abund.norm.voom, fileName)
+}
+```
+
+
+# 7. Save the data
+
+```{r}
+fileName<- file.path(dirDataclean, paste(projectNumber,"_voom_normalized_Batch_1_2_4.RDS",sep=""))
+if(file.exists(fileName)){
+  dat.voom_batch_1_2_4 <- readRDS(fileName)
+} else {
+ dat.voom_batch_1_2_4 <- dat.pc_batch_1_2_4.abund.norm.voom
+  saveRDS(dat.voom_batch_1_2_4, fileName)
+}
+
+```
+
+
+
+
+#Draw lines between the biological replicates
+```{r}
+u_id <- dat.voom_batch_1_2_4$targets %>% subset(Treatment%notin%c("CXCL10 + RV16","IFNb + RV16")) %>% distinct() %>% mutate(d_t = paste(donorId,timePoint,sep = "_")) %>% count(d_t) %>% subset(n>1) %>% pull(d_t)
+lib_replicates <- dat.voom_batch_1_2_4$targets %>% subset(Treatment%notin%c("CXCL10 + RV16","IFNb + RV16")) %>% mutate(d_t = paste(donorId,timePoint,sep = "_")) %>% subset(d_t %in% u_id) %>% pull(libid)
+dat.voom_batch_1_2_4$targets <- dat.voom_batch_1_2_4$targets %>% mutate(Replicate = ifelse(libid %in% lib_replicates,"replicate","unique")) %>% mutate(u_id = paste(donorId,timePoint,sep = "_"))
+```
+
+
+# 8. PCA final data set
+
+
+
+
+## 8.1 PCA by Treatment
+```{r  echo=FALSE, warning=FALSE}
+
+#Calculate PCA for voom norm data.
+PCA.voom <- as.data.frame(dat.voom_batch_1_2_4$E) %>% 
+  t() %>% 
+  #Calc PCA
+  prcomp(scale. = TRUE)
+PC1.label <- paste("PC1 (", summary(PCA.voom)$importance[2,1]*100, "%)", sep="")
+PC2.label <-paste("PC2 (", summary(PCA.voom)$importance[2,2]*100, "%)", sep="")
+PC3.label <-paste("PC3 (", summary(PCA.voom)$importance[2,3]*100, "%)", sep="")
+# Extract PC values
+PCA.voom.dat<- as.data.frame(PCA.voom$x) %>% 
+  rownames_to_column("libid") %>%
+  # Select PCs for plotting
+  dplyr::select(libid, PC1:PC3) %>% 
+  # Merge with metadata
+  left_join(as.data.frame(dat.voom_batch_1_2_4$targets),
+            by="libid")
+plot_normalized_project<-ggplot(PCA.voom.dat ,
+                  aes(PC1, PC2)) +
+           geom_point(aes(color=project),
+                      size=3) +
+  #Beautify
+  theme_classic() +
+  theme(legend.title = element_blank(),
+        legend.position = "right",legend.text = element_text(size=12)) + 
+  labs(x=PC1.label, y=PC2.label, title="Voom normalized log2 CPM") +
+  coord_fixed(ratio=1)
+plot_normalized_project
+
+plot_normalized_replicates_project<-ggplot(PCA.voom.dat ,
+                  aes(PC1, PC2)) +
+           geom_point(aes(color=project,shape=Replicate),
+                      size=3) +
+  geom_line(data = PCA.voom.dat %>% subset(Replicate=="replicate"),aes(group=u_id),alpha=0.5) +
+  #Beautify
+  theme_classic() +
+  theme(legend.title = element_blank(),
+        legend.position = "right",legend.text = element_text(size=12)) + 
+  labs(x=PC1.label, y=PC2.label, title="Voom normalized log2 CPM") +
+  coord_fixed(ratio=1) + scale_shape_manual(values=c("replicate"=16,"unique"=1))
+plot_normalized_replicates_project
+
+
+plot_normalized_replicates_viral<-ggplot(PCA.voom.dat ,
+                  aes(PC1, PC2)) +
+           geom_point(aes(color=log10viral_load,shape=Replicate),
+                      size=3) +
+  geom_line(data = PCA.voom.dat %>% subset(Replicate=="replicate"),aes(group=u_id),alpha=0.5) +
+  #Beautify
+  theme_classic() +
+  theme(legend.title = element_blank(),
+        legend.position = "right",legend.text = element_text(size=12)) + 
+  labs(x=PC1.label, y=PC2.label, title="Voom normalized log2 CPM") +
+  coord_fixed(ratio=1) + scale_shape_manual(values=c("replicate"=16,"unique"=1))
+plot_normalized_replicates_project
+
+library(patchwork)
+plot_normalized_project + plot_normalized_replicates_project + plot_layout(guides = "collect",ncol = 2)
+```
+
+Viral load correlation
+```{r}
+dat.voom_batch_1_2_4$targets %>% subset(Replicate == "replicate"&timePoint!="Control") %>% select(project,u_id,log10viral_load) %>% mutate(Batch = ifelse(project == "P513-4","Batch_4","Batch_1_2")) %>% 
+  select(-c(project)) %>% pivot_wider(names_from = Batch,values_from = log10viral_load) %>% ggplot(aes(Batch_4,Batch_1_2)) + geom_point() + geom_smooth(method = "lm") + labs(x="Batch 4",y="Batch 1_2")
+
+```
+```

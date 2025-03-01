@@ -1,0 +1,839 @@
+---
+title: "P513-4 : Dysregulated asthmatic epithelial interferon responses to viruses drive exacerbation, T2 inflammation, and airway remodeling | Analysis"
+output: 
+  html_document:
+    toc: yes
+    toc_float:
+      collapsed: no
+  pdf_document:
+    toc: yes
+editor_options:
+  chunk_output_type: console
+header-includes:
+  \usepackage{float}
+---
+
+```{=html}
+<style type="text/css">
+body{ /* Normal  */
+      font-size: 14px;
+  }
+h1 { /* Header 1 */
+  font-size: 28px;
+}
+h2 { /* Header 2 */
+    font-size: 24px;
+}
+h3 { /* Header 3 */
+  font-size: 20px;
+}
+h4 { /* Header 4 */
+  font-size: 16px;
+}
+</style>
+```
+
+```{r include=FALSE}
+knitr::opts_chunk$set(fig.height=8.5, fig.width = 8.5, echo=FALSE,message=FALSE, warning=FALSE)
+```
+
+# Project Summary
+
+This analysis examines **interferon response changes** post-baseline and post-rhinovirus infection. The primary goals are:
+
+-   Understanding **kinetics of interferon responses**
+-   Investigating their **relation to viral clearance and patient history**
+-   Comparing **Type 1 and Type 2 interferon responses** across conditions
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE}
+library(knitr)
+library(tidyverse)
+
+library(ggthemes)
+#library(edgeR)
+library(RColorBrewer)
+library(kableExtra)
+library(viridis)
+library(ggbeeswarm)
+library(gplots)
+library(upstartr)
+library(janitor)
+library(cowplot)
+library(edgeR)
+library(ggpubr)
+
+library(ComplexHeatmap)
+library(limma)
+library(data.table)
+library(multcomp)
+
+library(bRi)
+library(miscHelpers)
+library(RNAseQC)
+library(countSubsetNorm)
+library(apird)
+
+
+library(randomcoloR)
+library(dendextend)
+library(corrplot)
+library(patchwork)
+#library(ggsankey)
+# Change package priority to dplyr, not a great way to do it but works for(if it aint broke dont fix it)
+select <- dplyr::select
+rename <- dplyr::rename
+filter <- dplyr::filter
+distinct <- dplyr::distinct
+mutate <- dplyr::mutate
+
+
+opts_chunk$set(
+  fig.width=6, fig.height=4.25, cache = TRUE,
+  echo=FALSE, warning=FALSE, message=FALSE)
+options(stringsAsFactors = FALSE)
+
+theme_set(
+  theme_bw(20) +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_rect(colour="black", fill = NA, size = 1),
+          axis.text = element_text(colour="black"),
+          axis.ticks = element_line(colour="black"),
+          axis.text.x = element_text(angle=0)))
+update_geom_defaults("point", list(shape=16))
+grDevices::pdf.options(useDingbats = FALSE)
+options(ggrepel.max.overlaps = Inf)
+#Create 'not in' operator
+`%notin%` <- Negate(`%in%`)
+# test_plot <- ggplot2::ggplot(mapping = ggplot2::aes(x = 1:10, y = 1:10)) + ggplot2::geom_point()
+# ggplot(mapping = aes(x = 1:10, y = 1:10)) + geom_point()
+
+
+IFN_treatment_col <- c("None" = "grey60", 
+                       "CXCL10" = "mediumorchid", 
+                       "IFNb" = "darkorange3")
+
+virus_col <- c("None" = "steelblue", 
+               "RV16" = "red")
+
+Treatment_col <- c("None + None" = "grey60", 
+                   "None + RV16" = "#D01556FF", 
+                   "CXCL10 + RV16" = "#EFDC60FF",  # Blend of mediumorchid + firebrick
+                   "IFNb + RV16" = "#7CCA89FF") 
+ rasterResolutionDpi <- 800
+    
+ 
+ clean_column_names <- function(col_names) {
+  col_names %>%
+    str_replace_all("\\.\\.\\.+", "_") %>%  # Replace multiple dots with a single underscore
+    str_replace_all("\\.", "_") %>%         # Replace remaining dots with underscores
+    str_replace_all("_$", "") %>%           # Remove trailing underscores
+    str_replace_all("__+", "_") %>%         # Remove double underscores
+    str_replace_all("\\s+", "_") %>%        # Replace spaces with underscores
+    str_replace_all("[^A-Za-z0-9_]", "")    # Remove any remaining special characters
+}
+```
+
+```{r setFilenamesAndGlobalVariables}
+projectNumber <- "P513-4"
+dirBoxBase <- 
+  file.path("~", "Library", "CloudStorage", "Box-Box")
+dirRoot <-
+  file.path(
+    dirBoxBase, "Altman_Lab", # Box version
+    # "~", "Documents", "Projects_local", # local version
+    projectNumber)
+dirPlots <- file.path("Figs")
+dirresults <- file.path("Results")
+dirDataclean <- file.path("Data_clean")
+dirDataraw <- file.path("Data_raw")
+dirFigManu <- file.path(dirPlots,"Manuscript_versions")
+
+
+```
+
+Set seed
+
+```{r}
+set.seed(4389)
+```
+
+# 1. Load data
+
+```{r}
+load(file.path(dirDataclean, "P513-4_voom_normalized.RData"))
+load(file.path(dirDataclean, "P513-4_Module.RData"))
+
+dat.voom$targets <- dat.voom$targets %>% mutate(Treatment = factor(Treatment,c("None + None","None + RV16", "IFNb + RV16","CXCL10 + RV16"))) %>% 
+  mutate(treatment = factor(treatment,levels=c("None","IFNb","CXCL10")))
+
+dat.module$targets <- dat.module$targets %>% mutate(Treatment = factor(Treatment,c("None + None","None + RV16", "IFNb + RV16","CXCL10 + RV16"))) %>% 
+  mutate(treatment = factor(treatment,levels=c("None","IFNb","CXCL10")))
+```
+
+# 2. Gene level analysis
+
+## Run the analysis just on treatment without exacerbation or other covariates
+
+`~ Treatment + (1|donorId)`
+
+```{r}
+fileName<- file.path(dirresults, paste(projectNumber,"Model_Treatment.RDS",sep = "_"))
+if(file.exists(fileName)){
+  model_Treatment <- readRDS(fileName)
+} else {
+  model_Treatment <- kimma::kmFit(dat = dat.voom,patientID = "donorId",libraryID = "libid",
+                                  model = "~ Treatment + (1|donorId)",run_lm = TRUE,run_lme = TRUE,
+                                  run_contrast = TRUE,use_weights = TRUE,metrics = TRUE,processors = 6)
+  saveRDS(model_Treatment, fileName)
+}
+
+```
+
+```{r}
+
+model_Treatment_kimma_summ <- kimma::summarise_kmFit(model_Treatment$lme,fdr.cutoff = c(0.01,0.05, 0.1, 0.2,0.5))
+
+model_Treatment_kimma_summ %>% 
+kable(align="l",
+      caption="Significant DEGs") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+model_Treatment_kimma_summ_cont <- kimma::summarise_kmFit(model_Treatment$lme.contrast,fdr.cutoff = c(0.01,0.05, 0.1, 0.2,0.5))
+
+model_Treatment_kimma_summ_cont %>% 
+kable(align="l",
+      caption="Significant DEGs") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+write_csv(model_Treatment$lme %>% subset(variable!="(1 | donorId)") %>% left_join(dat.voom$genes %>% select(geneName,hgnc_symbol),by=c("gene"="geneName")), file.path(dirresults, paste(projectNumber,"Treatment_kimma_lme.csv",sep = "_")))
+write_csv(model_Treatment$lme.contrast %>% left_join(dat.voom$genes %>% select(geneName,hgnc_symbol),by=c("gene"="geneName")), file.path(dirresults, paste(projectNumber,"Treatment_kimma_lme_contrast.csv",sep = "_")))
+```
+
+## Run the analysis just on treatment without exacerbation with median cv and sex as covariates
+
+`~ Treatment + median_cv_coverage + Sex + (1|donorId)`
+
+```{r}
+fileName<- file.path(dirresults, paste(projectNumber,"Model_Treatment_w_mcv_sex.RDS",sep = "_"))
+if(file.exists(fileName)){
+  model_Treatment_w_mcv_sex <- readRDS(fileName)
+} else {
+  model_Treatment_w_mcv_sex <- kimma::kmFit(dat = dat.voom,patientID = "donorId",libraryID = "libid",
+                                  model = "~ Treatment + median_cv_coverage + Sex + (1|donorId)",run_lm = TRUE,run_lme = TRUE,
+                                  run_contrast = TRUE,use_weights = TRUE,metrics = TRUE,contrast_var = "Treatment",processors = 6)
+  saveRDS(model_Treatment_w_mcv_sex, fileName)
+}
+
+```
+
+```{r}
+
+model_Treatment_w_mcv_sex_kimma_summ <- kimma::summarise_kmFit(model_Treatment_w_mcv_sex$lme,fdr.cutoff = c(0.01,0.05, 0.1, 0.2,0.5))
+
+model_Treatment_w_mcv_sex_kimma_summ %>% 
+kable(align="l",
+      caption="Significant DEGs") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+model_Treatment_w_mcv_sex_kimma_summ_cont <- kimma::summarise_kmFit(model_Treatment_w_mcv_sex$lme.contrast,fdr.cutoff = c(0.01,0.05, 0.1, 0.2,0.5))
+
+model_Treatment_w_mcv_sex_kimma_summ_cont %>% 
+kable(align="l",
+      caption="Significant DEGs") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+write_csv(model_Treatment_w_mcv_sex$lme %>% subset(variable!="(1 | donorId)") %>% left_join(dat.voom$genes %>% select(geneName,hgnc_symbol),by=c("gene"="geneName")), file.path(dirresults, paste(projectNumber,"Treatment_w_mcv_sex_kimma_lme.csv",sep = "_")))
+write_csv(model_Treatment_w_mcv_sex$lme.contrast %>% left_join(dat.voom$genes %>% select(geneName,hgnc_symbol),by=c("gene"="geneName")), file.path(dirresults, paste(projectNumber,"Treatment_w_mcv_sex_kimma_lme_contrast.csv",sep = "_")))
+```
+
+## Run the analysis just on treatment without exacerbation with median cv as covariates
+
+`~ Treatment + median_cv_coverage + (1|donorId)`
+
+```{r}
+fileName<- file.path(dirresults, paste(projectNumber,"Model_Treatment_w_mcv.RDS",sep = "_"))
+if(file.exists(fileName)){
+  model_Treatment_w_mcv <- readRDS(fileName)
+} else {
+  model_Treatment_w_mcv <- kimma::kmFit(dat = dat.voom,patientID = "donorId",libraryID = "libid",
+                                  model = "~ Treatment + median_cv_coverage + (1|donorId)",run_lm = TRUE,run_lme = TRUE,
+                                  run_contrast = TRUE,use_weights = TRUE,metrics = TRUE,contrast_var = "Treatment",processors = 6)
+  saveRDS(model_Treatment_w_mcv, fileName)
+}
+
+```
+
+```{r}
+
+model_Treatment_w_mcv_kimma_summ <- kimma::summarise_kmFit(model_Treatment_w_mcv$lme,fdr.cutoff = c(0.01,0.05, 0.1, 0.2,0.5))
+
+model_Treatment_w_mcv_kimma_summ %>% 
+kable(align="l",
+      caption="Significant DEGs") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+model_Treatment_w_mcv_kimma_summ_cont <- kimma::summarise_kmFit(model_Treatment_w_mcv$lme.contrast,fdr.cutoff = c(0.01,0.05, 0.1, 0.2,0.5))
+
+model_Treatment_w_mcv_kimma_summ_cont %>% 
+kable(align="l",
+      caption="Significant DEGs") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+write_csv(model_Treatment_w_mcv$lme %>% subset(variable!="(1 | donorId)") %>% left_join(dat.voom$genes %>% select(geneName,hgnc_symbol),by=c("gene"="geneName")), file.path(dirresults, paste(projectNumber,"Treatment_w_mcv_kimma_lme.csv",sep = "_")))
+write_csv(model_Treatment_w_mcv$lme.contrast %>% left_join(dat.voom$genes %>% select(geneName,hgnc_symbol),by=c("gene"="geneName")), file.path(dirresults, paste(projectNumber,"Treatment_w_mcv_kimma_lme_contrast.csv",sep = "_")))
+```
+
+#Run enrichment fo genes by up and down
+
+```{r}
+fdr_cutoff <- 0.05
+model_Treatment_w_mcv_w_contrast_w_hgnc <- model_Treatment_w_mcv$lme.contrast %>% left_join(dat.voom$genes %>% select(geneName,hgnc_symbol),by=c("gene"="geneName")) %>% mutate(comparison = paste(contrast_lvl,contrast_ref,sep = "vs"))
+model_Treatment_w_mcv_w_contrast_w_hgnc_genes_up_list <- list()
+for(up_reg_ in unique(model_Treatment_w_mcv_w_contrast_w_hgnc$comparison)){
+  model_Treatment_w_mcv_w_contrast_w_hgnc_genes_up_list[[up_reg_]] <- model_Treatment_w_mcv_w_contrast_w_hgnc %>% subset(comparison == up_reg_&FDR<=fdr_cutoff&estimate>0) %>% pull(hgnc_symbol) 
+}
+
+model_Treatment_w_mcv_w_contrast_w_hgnc_genes_down_list <- list()
+for(down_reg_ in unique(model_Treatment_w_mcv_w_contrast_w_hgnc$comparison)){
+  model_Treatment_w_mcv_w_contrast_w_hgnc_genes_down_list[[down_reg_]] <- model_Treatment_w_mcv_w_contrast_w_hgnc %>% subset(comparison == down_reg_&FDR<=fdr_cutoff&estimate<0) %>% pull(hgnc_symbol) 
+}
+model_Treatment_w_mcv_w_contrast_w_hgnc_genes_down_list[lapply(model_Treatment_w_mcv_w_contrast_w_hgnc_genes_down_list,length)>2]
+enrich_H_model_Treatment_w_mcv_w_contrast_w_hgnc_genes_up <- SEARchways::BIGprofiler(gene_list = model_Treatment_w_mcv_w_contrast_w_hgnc_genes_up_list[lapply(model_Treatment_w_mcv_w_contrast_w_hgnc_genes_up_list,length)>2],category = "H")
+enrich_H_model_Treatment_w_mcv_w_contrast_w_hgnc_genes_down <- SEARchways::BIGprofiler(gene_list = model_Treatment_w_mcv_w_contrast_w_hgnc_genes_down_list[lapply(model_Treatment_w_mcv_w_contrast_w_hgnc_genes_down_list,length)>2],category = "H")
+
+BIGpicture::plot_enrich(enrich_H_model_Treatment_w_mcv_w_contrast_w_hgnc_genes_up)
+BIGpicture::plot_enrich(enrich_H_model_Treatment_w_mcv_w_contrast_w_hgnc_genes_down)
+```
+
+Plot AIC & BIC from models
+
+```{r}
+library(BIGpicture)
+BIGpicture::plot_fit2(model_Treatment,model_Treatment_w_mcv,x="lme", y="lme",metrics = "AIC")
+BIGpicture::plot_fit2(model_Treatment,model_Treatment_w_mcv,x="lme", y="lme",metrics = "BIC")
+```
+
+## Run the analysis just on treatment with exacerbation with median cv and sex as covariates
+
+`~ Treatment*Exacerbation + median_cv_coverage + Sex + (1|donorId)`
+
+```{r}
+fileName<- file.path(dirresults, paste(projectNumber,"Model_Treatment_Exacerbation_w_mcv_sex.RDS",sep = "_"))
+if(file.exists(fileName)){
+  model_Treatment_Exacerbation_w_mcv_sex <- readRDS(fileName)
+} else {
+  model_Treatment_Exacerbation_w_mcv_sex <- kimma::kmFit(dat = dat.voom,patientID = "donorId",libraryID = "libid",
+                                  model = "~ Treatment*Exacerbation + median_cv_coverage + Sex + (1|donorId)",run_lm = TRUE,run_lme = TRUE,
+                                  run_contrast = TRUE,use_weights = TRUE,metrics = TRUE,contrast_var = "Treatment:Exacerbation",processors = 6)
+  saveRDS(model_Treatment_Exacerbation_w_mcv_sex, fileName)
+}
+
+```
+
+```{r}
+
+model_Treatment_Exacerbation_w_mcv_sex_kimma_summ <- kimma::summarise_kmFit(model_Treatment_Exacerbation_w_mcv_sex$lme,fdr.cutoff = c(0.01,0.05, 0.1, 0.2,0.5))
+
+model_Treatment_Exacerbation_w_mcv_sex_kimma_summ %>% 
+kable(align="l",
+      caption="Significant DEGs") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+model_Treatment_Exacerbation_w_mcv_sex_kimma_summ_cont <- kimma::summarise_kmFit(model_Treatment_Exacerbation_w_mcv_sex$lme.contrast,fdr.cutoff = c(0.01,0.05, 0.1, 0.2,0.5))
+
+model_Treatment_Exacerbation_w_mcv_sex_kimma_summ_cont %>% 
+kable(align="l",
+      caption="Significant DEGs") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+write_csv(model_Treatment_Exacerbation_w_mcv_sex$lme %>% subset(variable!="(1 | donorId)") %>% left_join(dat.voom$genes %>% select(geneName,hgnc_symbol),by=c("gene"="geneName")), file.path(dirresults, paste(projectNumber,"Treatment_Exacerbation_w_mcv_sex_kimma_lme.csv",sep = "_")))
+write_csv(model_Treatment_Exacerbation_w_mcv_sex$lme.contrast %>% left_join(dat.voom$genes %>% select(geneName,hgnc_symbol),by=c("gene"="geneName")), file.path(dirresults, paste(projectNumber,"Treatment_Exacerbation_w_mcv_sex_kimma_lme_contrast.csv",sep = "_")))
+```
+
+## Run the analysis just on treatment with exacerbation with median cv as covariates
+
+`~ Treatment*Exacerbation + median_cv_coverage  + (1|donorId)`
+
+```{r}
+fileName<- file.path(dirresults, paste(projectNumber,"Model_Treatment_Exacerbation_w_mcv.RDS",sep = "_"))
+if(file.exists(fileName)){
+  model_Treatment_Exacerbation_w_mcv <- readRDS(fileName)
+} else {
+  model_Treatment_Exacerbation_w_mcv <- kimma::kmFit(dat = dat.voom,patientID = "donorId",libraryID = "libid",
+                                  model = "~ Treatment*Exacerbation + median_cv_coverage  + (1|donorId)",run_lm = TRUE,run_lme = TRUE,
+                                  run_contrast = TRUE,use_weights = TRUE,metrics = TRUE,contrast_var = "Treatment:Exacerbation",processors = 6)
+  saveRDS(model_Treatment_Exacerbation_w_mcv, fileName)
+}
+
+```
+
+```{r}
+
+model_Treatment_Exacerbation_w_mcv_kimma_summ <- kimma::summarise_kmFit(model_Treatment_Exacerbation_w_mcv$lme,fdr.cutoff = c(0.01,0.05, 0.1, 0.2,0.5))
+
+model_Treatment_Exacerbation_w_mcv_kimma_summ %>% 
+kable(align="l",
+      caption="Significant DEGs") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+model_Treatment_Exacerbation_w_mcv_kimma_summ_cont <- kimma::summarise_kmFit(model_Treatment_Exacerbation_w_mcv$lme.contrast,fdr.cutoff = c(0.01,0.05, 0.1))
+
+model_Treatment_Exacerbation_w_mcv_kimma_summ_cont %>% 
+kable(align="l",
+      caption="Significant DEGs") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+write_csv(model_Treatment_Exacerbation_w_mcv$lme %>% subset(variable!="(1 | donorId)") %>% left_join(dat.voom$genes %>% select(geneName,hgnc_symbol),by=c("gene"="geneName")), file.path(dirresults, paste(projectNumber,"Treatment_kimma_lme.csv",sep = "_")))
+write_csv(model_Treatment_Exacerbation_w_mcv$lme.contrast %>% left_join(dat.voom$genes %>% select(geneName,hgnc_symbol),by=c("gene"="geneName")), file.path(dirresults, paste(projectNumber,"Treatment_kimma_lme_contrast.csv",sep = "_")))
+```
+
+Plot AIC & BIC from models
+
+```{r}
+
+BIGpicture::plot_fit2(model_Treatment,model_Treatment_w_mcv_sex,x="lme", y="lme",metrics = "AIC")
+BIGpicture::plot_fit2(model_Treatment,model_Treatment_w_mcv_sex,x="lme", y="lme",metrics = "BIC")
+```
+
+#Make Module plots
+
+```{r}
+iqr = function(z, lower = 0.25, upper = 0.75) {
+  data.frame(
+    y = median(z),
+    ymin = quantile(z, lower),
+    ymax = quantile(z, upper)
+  )
+}
+
+dat.module_w_meta <- dat.module$E %>% t() %>%as.data.frame() %>%  rownames_to_column("libid") %>% pivot_longer(!libid,names_to = "Module",values_to = "moduleExp") %>% left_join(dat.module$targets)
+
+
+#Make boxplots for all module by Treatment
+dat.module_w_meta %>% ggplot(aes(x = Treatment, y = moduleExp, fill = Treatment)) + geom_boxplot() + facet_wrap(~Module,scales = "free_y") + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + theme(legend.position = "none")
+
+
+ggplot(dat.module_w_meta, 
+       aes(x = Treatment, y = moduleExp, color = Treatment, 
+           fill = Treatment)) +
+  geom_jitter(size = 3, width = 0.2, height = 0, alpha = 0.8) +
+  stat_summary(fun.data = iqr, linewidth = 1, geom = "errorbar", width = 0.3) + 
+  stat_summary(fun = mean, fun.min = mean, fun.max = mean,
+               geom = "crossbar", width = 0.5) +
+  theme_classic() +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(angle = 45, hjust = 1), 
+        text = element_text(size = 15), 
+        axis.title = element_text(size = 18)) +
+  facet_wrap(~Module,scales = "free_y") + scale_fill_manual(values = Treatment_col) + scale_color_manual(values = Treatment_col)
+
+
+#Subset to 5 modules of Interest
+mod_of_int <- c("module_09","module_02","module_15","module_39","module_22")
+mod_of_int_w_name <- tibble("Module" = mod_of_int,"Module_Name" = c("Interferon Response (m09)","Epithelial Remodeling and Inflammation (m02)","Stress Response (m15)",
+                                                                      "Cellular metabolism (m39)","Cellular Transcriptional Activity (m22)"))
+  
+  
+  #Add module names
+Modules_from_Manuscript_by_Treatment <- ggplot(dat.module_w_meta %>% subset(Module%in% mod_of_int) %>% left_join(mod_of_int_w_name) %>% mutate(Module_Name = factor(Module_Name,levels=mod_of_int_w_name$Module_Name)), 
+         aes(x = Treatment, y = moduleExp, color = Treatment, 
+             fill = Treatment)) +
+    #geom_jitter(size = 3, width = 0.2, height = 0, alpha = 0.8) +
+    geom_point(size = 3,alpha = 0.8)+
+    geom_line(aes(group = donorId), color = "gray70", alpha = 0.5,linetype=2) +
+    stat_summary(fun.data = iqr, linewidth = 1, geom = "errorbar", width = 0.3) + 
+    stat_summary(fun = mean, fun.min = mean, fun.max = mean,
+                 geom = "crossbar", width = 0.5) +
+    theme_classic() +
+    theme(legend.position = "none", 
+          axis.text.x = element_text(angle = 45, hjust = 1), 
+          text = element_text(size = 15), 
+          axis.title = element_text(size = 18)) +
+    facet_wrap(~Module_Name,scales = "free_y") + scale_fill_manual(values = Treatment_col) + scale_color_manual(values = Treatment_col) +
+    ylab("Mean Expression (log2)")
+
+ggsave(paste(file.path(dirPlots,"Module_from_Manuscript_Expression_by_Treatment.pdf"),sep = "_"), Modules_from_Manuscript_by_Treatment, width = 10, height = 10, units = "in", dpi = rasterResolutionDpi)
+ggsave(paste(file.path(dirPlots,"Module_from_Manuscript_Expression_by_Treatment.png"),sep = "_"), Modules_from_Manuscript_by_Treatment, width = 10, height = 10, units = "in", dpi = rasterResolutionDpi)
+
+dat.module_w_meta_module_from_Manuscript <- dat.module_w_meta %>% subset(Module%in% mod_of_int) %>% left_join(mod_of_int_w_name) %>% mutate(Module_Name = factor(Module_Name,levels=mod_of_int_w_name$Module_Name))
+Modules_from_Manuscript_by_Treatment_by_exacerbation_list<-list()
+for(mod_ in unique(dat.module_w_meta_module_from_Manuscript$Module_Name)){
+Modules_from_Manuscript_by_Treatment_by_exacerbation_list[[mod_]] <- ggplot(dat.module_w_meta_module_from_Manuscript %>% subset(Module_Name == mod_), 
+         aes(x = Treatment, y = moduleExp, color = interaction(Treatment, Exacerbation), 
+             fill = interaction(Treatment, Exacerbation))) +
+    #geom_jitter(size = 3, width = 0.2, height = 0, alpha = 0.8) +
+    geom_point(size = 3,alpha = 0.8)+
+    geom_line(aes(group = donorId), color = "gray70", alpha = 0.5,linetype=2) +
+    stat_summary(fun.data = iqr, linewidth = 1, geom = "errorbar", width = 0.3) + 
+    stat_summary(fun = mean, fun.min = mean, fun.max = mean,
+                 geom = "crossbar", width = 0.5) +
+    theme_classic() +
+    theme(legend.position = "none", 
+          axis.text.x = element_text(angle = 45, hjust = 1), 
+          text = element_text(size = 15), 
+          axis.title = element_text(size = 18)) +
+    facet_grid(~Exacerbation) + 
+    ylab("Mean Expression (log2)") + ggtitle(mod_) +
+  scale_color_manual(values = c(
+    "None + None.No Severe Exacerbation" = "#BFBFBF",
+    "CXCL10 + RV16.No Severe Exacerbation" = "#7F7F7F",
+    "None + RV16.No Severe Exacerbation" = "black",
+    "IFNb + RV16.No Severe Exacerbation" = "#3F3F3F",
+    "None + None.Severe Exacerbation" = "#E2BFBF",
+    "CXCL10 + RV16.Severe Exacerbation" = "#C47F7F",
+    "None + RV16.Severe Exacerbation" = "darkred",
+    "IFNb + RV16.Severe Exacerbation" = "#A83F3F"
+  )) +
+  scale_fill_manual(values = c(
+    "None + None.No Severe Exacerbation" = "#BFBFBF",
+    "CXCL10 + RV16.No Severe Exacerbation" = "#3F3F3F",
+    "None + RV16.No Severe Exacerbation" = "black",
+    "IFNb + RV16.No Severe Exacerbation" = "#7F7F7F",
+    "None + None.Severe Exacerbation" = "#E2BFBF",
+    "CXCL10 + RV16.Severe Exacerbation" = "#C47F7F",
+    "None + RV16.Severe Exacerbation" = "darkred",
+    "IFNb + RV16.Severe Exacerbation" = "#A83F3F"
+  )) + xlab("")
+}
+Modules_from_Manuscript_by_Treatment_by_exacerbation_combined <- patchwork::wrap_plots(Modules_from_Manuscript_by_Treatment_by_exacerbation_list,ncol = 3,guides = "collect",axes = "collect_y")
+ggsave(paste(file.path(dirPlots,"Module_from_Manuscript_Expression_by_Treatment_split_by_Exacerbation.pdf"),sep = "_"), Modules_from_Manuscript_by_Treatment_by_exacerbation_combined, width = 15, height = 10, units = "in", dpi = rasterResolutionDpi)
+
+ggsave(paste(file.path(dirPlots,"Module_from_Manuscript_Expression_by_Treatment_split_by_Exacerbation.png"),sep = "_"), Modules_from_Manuscript_by_Treatment_by_exacerbation_combined, width = 15, height = 10, units = "in", dpi = rasterResolutionDpi)
+
+```
+
+#Run module level analysis `~ Treatment + median_cv_coverage + (1|donorId)`
+
+```{r}
+fileName<- file.path(dirresults, paste(projectNumber,"Model_Treatment_w_mcv_Module.RDS",sep = "_"))
+if(file.exists(fileName)){
+  model_Treatment_w_mcv_module <- readRDS(fileName)
+} else {
+  model_Treatment_w_mcv_module <- kimma::kmFit(counts = dat.module$E,
+                                               meta = dat.module$targets,
+                                               patientID = "donorId",
+                                               libraryID = "libid",
+                                  model = "~ Treatment + median_cv_coverage + (1|donorId)",
+                                  run_lm = TRUE,run_lme = TRUE,
+                                  run_contrast = TRUE,use_weights = FALSE,
+                                  metrics = TRUE,contrast_var = "Treatment",
+                                  processors = 6)
+  saveRDS(model_Treatment_w_mcv_module, fileName)
+}
+
+```
+
+```{r}
+
+model_Treatment_w_mcv_module_kimma_summ <- kimma::summarise_kmFit(model_Treatment_w_mcv_module$lme,fdr.cutoff = c(0.01,0.05, 0.1, 0.2,0.5))
+
+model_Treatment_w_mcv_module_kimma_summ %>% 
+kable(align="l",
+      caption="Significant DEGs") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+model_Treatment_w_mcv_module_kimma_summ_cont <- kimma::summarise_kmFit(model_Treatment_w_mcv_module$lme.contrast,fdr.cutoff = c(0.01,0.05, 0.1, 0.2,0.5))
+
+model_Treatment_w_mcv_module_kimma_summ_cont %>% 
+kable(align="l",
+      caption="Significant DEGs") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+write_csv(model_Treatment_w_mcv_module$lme %>% subset(variable!="(1 | donorId)") %>% left_join(dat.voom$genes %>% select(geneName,hgnc_symbol),by=c("gene"="geneName")), file.path(dirresults, paste(projectNumber,"Treatment_w_mcv_kimma_lme_Module.csv",sep = "_")))
+write_csv(model_Treatment_w_mcv_module$lme.contrast %>% left_join(dat.voom$genes %>% select(geneName,hgnc_symbol),by=c("gene"="geneName")), file.path(dirresults, paste(projectNumber,"Treatment_w_mcv_kimma_lme_contrast_Module.csv",sep = "_")))
+
+model_Treatment_w_mcv_module_contrast <- model_Treatment_w_mcv_module$lme.contrast %>% subset(contrast_ref == "(None + RV16)"& contrast_lvl == "(IFNb + RV16)") %>% subset(gene%in%unique(mod_of_int_w_name$Module)) %>% mutate(fold_change = 2^abs(estimate))
+```
+
+#Module expression to Viral load
+
+`~ Treatment + median_cv_coverage + (1|donorId)`
+
+```{r}
+fileName<- file.path(dirresults, paste(projectNumber,"Model_viral_load_w_mcv_Module.RDS",sep = "_"))
+if(file.exists(fileName)){
+  model_viral_load_w_mcv_module <- readRDS(fileName)
+} else {
+  model_viral_load_w_mcv_module <- kimma::kmFit(counts = dat.module$E,
+                                               meta = dat.module$targets,
+                                               patientID = "donorId",
+                                               libraryID = "libid",
+                                  model = "~ log10viral_load + median_cv_coverage + (1|donorId)",
+                                  run_lm = TRUE,run_lme = TRUE,use_weights = FALSE,
+                                  metrics = TRUE,
+                                  processors = 6)
+  saveRDS(model_viral_load_w_mcv_module, fileName)
+}
+
+```
+
+```{r}
+
+model_viral_load_w_mcv_module_kimma_summ <- kimma::summarise_kmFit(model_viral_load_w_mcv_module$lme,fdr.cutoff = c(0.01,0.05, 0.1, 0.2))
+
+model_viral_load_w_mcv_module_kimma_summ %>% 
+kable(align="l",
+      caption="Significant DEGs") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+
+
+write_csv(model_viral_load_w_mcv_module$lme %>% subset(variable!="(1 | donorId)") %>% left_join(dat.voom$genes %>% select(geneName,hgnc_symbol),by=c("gene"="geneName")), file.path(dirresults, paste(projectNumber,"viral_load_w_mcv_kimma_lme_Module.csv",sep = "_")))
+
+model_viral_load_w_mcv_module_lme <- model_viral_load_w_mcv_module$lme %>% subset(variable=="log10viral_load") %>% subset(gene %in% mod_of_int_w_name$Module)
+```
+
+`~ Treatment*log10viral_load + median_cv_coverage + (1|donorId)`
+
+```{r}
+source("../../Bioinformatics_R_scripts/runLmerLoop.R")
+dat.module_w_meta_wo_none_none <- dat.module_w_meta %>% subset(Treatment!="None + None")
+fileName<- file.path(dirresults, paste(projectNumber,"Model_Treatment_viral_load_w_mcv_Module.RDS",sep = "_"))
+if(file.exists(fileName)){
+  model_Treatment_viral_load_w_mcv_module <- readRDS(fileName)
+} else {
+  model_Treatment_viral_load_w_mcv_module <- runLmerLoop(expressionDatawMeta=dat.module_w_meta_wo_none_none,lmerformula = "~ Treatment*log10viral_load + median_cv_coverage + (1|donorId)",nameCol = "Module",expCol = "moduleExp")
+  saveRDS(model_Treatment_viral_load_w_mcv_module, fileName)
+}
+
+```
+
+```{r}
+
+model_Treatment_viral_load_w_mcv_module_summ <- kimma::summarise_kmFit(model_Treatment_viral_load_w_mcv_module,fdr.cutoff = c(0.01,0.05, 0.1, 0.2))
+
+model_Treatment_viral_load_w_mcv_module_summ %>% 
+kable(align="l",
+      caption="Significant DEGs") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+
+
+write_csv(model_Treatment_viral_load_w_mcv_module %>% subset(variable!="(Intercept)"), file.path(dirresults, paste(projectNumber,"Treatment_viral_load_w_mcv_kimma_lme_Module.csv",sep = "_")))
+```
+
+Plot the 9 Modules that are significant for TreatmentIFNb + RV16:log10viral_load
+
+```{r}
+mods_sig_Treatment_IFNB_viral_load <- model_Treatment_viral_load_w_mcv_module %>% subset(FDR<=0.1&variable == "TreatmentIFNb + RV16:log10viral_load") %>% pull(gene)
+#Make scatterplot with correlation line between viral load and module colored by treatment
+Modules_from_Manuscript_by_Treatment_and_viralload <- dat.module_w_meta_wo_none_none %>% subset(Module%in%mod_of_int_w_name$Module) %>% left_join(mod_of_int_w_name) %>% ggplot(aes(x=log10viral_load,y=moduleExp)) + geom_point(aes(color = Treatment),size=3,alpha=0.8) + geom_smooth(method = "lm") + facet_wrap(~Module_Name,scales = "free_y",nrow=2) +
+  scale_color_manual(values = Treatment_col)
+
+ggsave(paste(file.path(dirPlots,"Module_from_Manuscript_Expression_by_Treatment_and_viralload.pdf"),sep = "_"), Modules_from_Manuscript_by_Treatment_and_viralload, width = 25, height = 10, units = "in", dpi = rasterResolutionDpi)
+
+
+```
+
+#Make the Viral load plot split by exacerbation
+## Fig 7 and supplemental
+### For the Figure remove the CXCL10 and supplemental keep the original version without lines
+```{r}
+
+IFN_experiment_plot_by_exacerbation_Fig7 <- ggplot(data=dat.voom$targets %>% subset(Treatment%in%c("None + RV16","IFNb + RV16")), 
+       aes(x = Treatment, y = log10viral_load, color = interaction(Treatment, Exacerbation), 
+           fill = interaction(Treatment, Exacerbation))) +
+  geom_point(size = 5,alpha = 0.8)+
+  geom_line(aes(group = donorId), color = "gray70", alpha = 0.5,linetype=2) + 
+  stat_summary(fun.data = iqr, linewidth = 1, geom = "errorbar", width = 0.3) + 
+  stat_summary(fun = mean, fun.min = mean, fun.max = mean,
+               geom = "crossbar", width = 0.5) +
+  theme_classic() +
+  theme(legend.position = "none", 
+        text = element_text(size = 15), 
+        axis.title = element_text(size = 18)) +
+  facet_grid(~Exacerbation) +
+  scale_color_manual(values = c(
+    "None + RV16.No Severe Exacerbation" = "black",
+    "IFNb + RV16.No Severe Exacerbation" = "gray60",
+    "None + RV16.Severe Exacerbation" = "darkred",
+    "IFNb + RV16.Severe Exacerbation" = "lightcoral"
+  )) +
+  scale_fill_manual(values = c(
+    "RV16.No Severe Exacerbation" = "black", 
+    "IFNb + RV16.No Severe Exacerbation" = "gray60",
+    "RV16.Severe Exacerbation" = "darkred",
+    "IFNb + RV16.Severe Exacerbation" = "lightcoral"
+  )) +
+  ylab("Viral Copy Number (log10)") + xlab("")
+
+ggsave(paste(file.path(dirFigManu,"Fig7_viral_load_by_by_Treatment_by_Exacerbation_wo_CXCL10.pdf"),sep = "_"),plot = IFN_experiment_plot_by_exacerbation_Fig7,height = 5,width = 6,dpi = rasterResolutionDpi)
+ggsave(paste(file.path(dirFigManu,"Fig7_viral_load_by_by_Treatment_by_Exacerbation_wo_CXCL10.png"),sep = "_"),plot = IFN_experiment_plot_by_exacerbation_Fig7,height = 5,width = 6,dpi = rasterResolutionDpi)
+
+IFN_experiment_plot_by_exacerbation_supplemental_w_cxcl10 <- ggplot(data=dat.voom$targets %>% subset(Treatment!="None + None"), 
+       aes(x = Treatment, y = log10viral_load, color = interaction(Treatment, Exacerbation), 
+           fill = interaction(Treatment, Exacerbation))) +
+  geom_jitter(size = 5, width = 0.15, height = 0, alpha = 0.8)+
+  stat_summary(fun.data = iqr, linewidth = 1, geom = "errorbar", width = 0.3) + 
+  stat_summary(fun = mean, fun.min = mean, fun.max = mean,
+               geom = "crossbar", width = 0.5) +
+  theme_classic() +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(angle = 45, hjust = 1), 
+        text = element_text(size = 15), 
+        axis.title = element_text(size = 18)) +
+  facet_grid(~Exacerbation) +
+  scale_color_manual(values = c(
+    "CXCL10 + RV16.No Severe Exacerbation" = "gray30",
+    "None + RV16.No Severe Exacerbation" = "black",
+    "IFNb + RV16.No Severe Exacerbation" = "gray60",
+    "CXCL10 + RV16.Severe Exacerbation" = "red",
+    "None + RV16.Severe Exacerbation" = "darkred",
+    "IFNb + RV16.Severe Exacerbation" = "lightcoral"
+  )) +
+  scale_fill_manual(values = c(
+    "RV16.No Severe Exacerbation" = "black", 
+    "CXCL10 + RV16.No Severe Exacerbation" = "gray30",
+    "IFNb + RV16.No Severe Exacerbation" = "gray60",
+    "RV16.Severe Exacerbation" = "darkred",
+    "CXCL10 + RV16.Severe Exacerbation" = "red",
+    "IFNb + RV16.Severe Exacerbation" = "lightcoral"
+  )) +
+  ylab("Viral Copy Number (log10)") + xlab("")
+
+ggsave(paste(file.path(dirFigManu,"Supplemental_viral_load_by_by_Treatment_by_Exacerbation_w_CXCL10.pdf"),sep = "_"),plot = IFN_experiment_plot_by_exacerbation_supplemental_w_cxcl10,height = 6,width = 6,dpi = rasterResolutionDpi)
+ggsave(paste(file.path(dirFigManu,"Supplemental_viral_load_by_by_Treatment_by_Exacerbation_w_CXCL10.png"),sep = "_"),plot = IFN_experiment_plot_by_exacerbation_supplemental_w_cxcl10,height = 6,width = 6,dpi = rasterResolutionDpi)
+
+
+#Run the lmer model within Exacerbation group and between excacerbation group(This without CXCL10)
+
+#Run within group Comparisons
+
+summary(lmerTest::lmer(data = dat.module_w_meta_wo_none_none %>% subset(Module=="module_09") %>% subset(Exacerbation == "No Severe Exacerbation"),formula = log10viral_load ~ Treatment + (1|donorId)))
+
+summary(lmerTest::lmer(data = dat.module_w_meta_wo_none_none %>% subset(Module=="module_09") %>% subset(Exacerbation == "Severe Exacerbation"),formula = log10viral_load~ Treatment + (1|donorId)))
+
+
+#Between exacerbation wo CXCL10
+
+# Fit the linear mixed model
+model <- lmerTest::lmer(log10viral_load ~ Exacerbation * Treatment + (1|donorId),
+              data = dat.voom$targets %>%
+                     subset(Treatment %notin% c("None + None","CXCL10 + RV16")))
+summary(model)
+# Get estimated marginal means (emmeans) for the interaction term
+emm <- emmeans::emmeans(model, pairwise ~ Exacerbation * Treatment)
+
+# Display the pairwise contrasts
+emm_results <- summary(emm)$contrast
+
+```
+
+
+#Make the Module expression by treatment and Module expression by viral load side by side
+```{r}
+#Version 1 with all Groups
+Modules_from_Manuscript_by_viralload_list<-list()
+for(mod_ in mod_of_int_w_name$Module_Name){
+Modules_from_Manuscript_by_viralload_list[[mod_]] <- dat.module_w_meta_wo_none_none %>% subset(Module%in%mod_of_int_w_name$Module) %>% left_join(mod_of_int_w_name) %>% subset(Module_Name == mod_) %>% ggplot(aes(x=log10viral_load,y=moduleExp)) + geom_point(aes(color = Treatment),size=3,alpha=0.8) + geom_smooth(method = "lm") +
+  scale_color_manual(values = Treatment_col) + xlab("Viral Copy Number (log10)") + ylab("Mean Expression (log2)")+ theme_classic() + theme(legend.position = "none",text = element_text(size = 15), 
+          axis.title = element_text(size = 18))
+}
+
+
+Modules_from_Manuscript_by_Treatment_list<-list()
+for(mod_ in mod_of_int_w_name$Module_Name){
+Modules_from_Manuscript_by_Treatment_list[[mod_]] <- ggplot(dat.module_w_meta %>% subset(Module%in% mod_of_int) %>% left_join(mod_of_int_w_name) %>% subset(Module_Name == mod_), 
+         aes(x = Treatment, y = moduleExp, color = Treatment, 
+             fill = Treatment)) +
+    #geom_jitter(size = 3, width = 0.2, height = 0, alpha = 0.8) +
+    geom_point(size = 3,alpha = 0.8)+
+    geom_line(aes(group = donorId), color = "gray70", alpha = 0.5,linetype=2) +
+    stat_summary(fun.data = iqr, linewidth = 1, geom = "errorbar", width = 0.3) + 
+    stat_summary(fun = mean, fun.min = mean, fun.max = mean,
+                 geom = "crossbar", width = 0.5) +
+    theme_classic() +
+    theme(#legend.position = "none", 
+          #axis.text.x = element_text(angle = 45, hjust = 1), 
+          text = element_text(size = 15), 
+          axis.title = element_text(size = 18)) +
+    scale_fill_manual(values = Treatment_col) + scale_color_manual(values = Treatment_col) +
+    ylab("Mean Expression (log2)") + ggtitle(mod_) + xlab("")
+}
+
+combined_module_expression_and_viral_load_plot_09_15_02_39_22<-
+Modules_from_Manuscript_by_Treatment_list$`IFN Response (m09)` + Modules_from_Manuscript_by_viralload_list$`IFN Response (m09)` +
+Modules_from_Manuscript_by_Treatment_list$`Epithelial Remodeling (m02)` + Modules_from_Manuscript_by_viralload_list$`Epithelial Remodeling (m02)`+
+Modules_from_Manuscript_by_Treatment_list$`Stress Response (m15)` + Modules_from_Manuscript_by_viralload_list$`Stress Response (m15)`  +  
+Modules_from_Manuscript_by_Treatment_list$`Cellular metabolism (m39)` + Modules_from_Manuscript_by_viralload_list$`Cellular metabolism (m39)` +
+Modules_from_Manuscript_by_Treatment_list$`Cellular Transcriptional Activity (m22)` + Modules_from_Manuscript_by_viralload_list$`Cellular Transcriptional Activity (m22)` + plot_layout(ncol = 2,guides = "collect",axis_titles = "collect",widths = c(0.60,0.35,0.05))
+
+ggsave(paste(file.path(dirFigManu,"Fig8_Module_expression_and_viral_load.pdf"),sep = "_"),plot = combined_module_expression_and_viral_load_plot_09_15_02_39_22,height = 12,width = 12,dpi = rasterResolutionDpi)
+ggsave(paste(file.path(dirFigManu,"Fig8_Module_expression_and_viral_load.png"),sep = "_"),plot = combined_module_expression_and_viral_load_plot_09_15_02_39_22,height = 12,width = 12,dpi = rasterResolutionDpi)
+
+
+
+#Version 2 with just the None +RV16 anf IFNb + RV16
+Modules_from_Manuscript_by_viralload_list_only_2_group<-list()
+for(mod_ in mod_of_int_w_name$Module_Name){
+Modules_from_Manuscript_by_viralload_list_only_2_group[[mod_]] <- dat.module_w_meta_wo_none_none %>% subset(Module%in%mod_of_int_w_name$Module) %>% left_join(mod_of_int_w_name) %>% subset(Module_Name == mod_) %>% 
+  subset(Treatment %in% c("None + RV16","IFNb + RV16")) %>% 
+  ggplot(aes(x=log10viral_load,y=moduleExp)) + geom_point(aes(color = Treatment),size=3,alpha=0.8) + geom_smooth(method = "lm") +
+  scale_color_manual(values = Treatment_col) + xlab("Viral Copy Number (log10)") + ylab("Mean Expression (log2)")+ theme_classic() + theme(legend.position = "none",text = element_text(size = 15), 
+          axis.title = element_text(size = 18))
+}
+
+
+Modules_from_Manuscript_by_Treatment_list_only_2_group<-list()
+for(mod_ in mod_of_int_w_name$Module_Name){
+Modules_from_Manuscript_by_Treatment_list_only_2_group[[mod_]] <- ggplot(dat.module_w_meta %>% subset(Module%in% mod_of_int) %>% left_join(mod_of_int_w_name) %>% 
+                                                                           subset(Treatment %in% c("None + RV16","IFNb + RV16")) %>% subset(Module_Name == mod_), 
+         aes(x = Treatment, y = moduleExp, color = Treatment, 
+             fill = Treatment)) +
+    #geom_jitter(size = 3, width = 0.2, height = 0, alpha = 0.8) +
+    geom_point(size = 3,alpha = 0.8)+
+    geom_line(aes(group = donorId), color = "gray70", alpha = 0.5,linetype=2) +
+    stat_summary(fun.data = iqr, linewidth = 1, geom = "errorbar", width = 0.3) + 
+    stat_summary(fun = mean, fun.min = mean, fun.max = mean,
+                 geom = "crossbar", width = 0.5) +
+    theme_classic() +
+    theme(#legend.position = "none", 
+          #axis.text.x = element_text(angle = 45, hjust = 1), 
+          text = element_text(size = 15), 
+          axis.title = element_text(size = 18)) +
+    scale_fill_manual(values = Treatment_col) + scale_color_manual(values = Treatment_col) +
+    ylab("Mean Expression (log2)") + ggtitle(mod_) + xlab("")
+}
+
+combined_module_expression_and_viral_load_plot_09_15_02_39_22_only_2_group<-
+Modules_from_Manuscript_by_Treatment_list_only_2_group$`IFN Response (m09)` + Modules_from_Manuscript_by_viralload_list_only_2_group$`IFN Response (m09)` +
+Modules_from_Manuscript_by_Treatment_list_only_2_group$`Epithelial Remodeling (m02)` + Modules_from_Manuscript_by_viralload_list_only_2_group$`Epithelial Remodeling (m02)`+
+Modules_from_Manuscript_by_Treatment_list_only_2_group$`Stress Response (m15)` + Modules_from_Manuscript_by_viralload_list_only_2_group$`Stress Response (m15)`  +  
+Modules_from_Manuscript_by_Treatment_list_only_2_group$`Cellular metabolism (m39)` + Modules_from_Manuscript_by_viralload_list_only_2_group$`Cellular metabolism (m39)` +
+Modules_from_Manuscript_by_Treatment_list_only_2_group$`Cellular Transcriptional Activity (m22)` + Modules_from_Manuscript_by_viralload_list_only_2_group$`Cellular Transcriptional Activity (m22)` + plot_layout(ncol = 2,guides = "collect",axis_titles = "collect",widths = c(0.60,0.35,0.05))
+
+ggsave(paste(file.path(dirFigManu,"Fig8_Module_expression_and_viral_load_2_group.pdf"),sep = "_"),plot = combined_module_expression_and_viral_load_plot_09_15_02_39_22_only_2_group,height = 13,width = 10,dpi = rasterResolutionDpi)
+ggsave(paste(file.path(dirFigManu,"Fig8_Module_expression_and_viral_load_2_group.png"),sep = "_"),plot = combined_module_expression_and_viral_load_plot_09_15_02_39_22_only_2_group,height = 13,width = 10,dpi = rasterResolutionDpi)
+```
+
+#Make the Module expression by treatment and Module expression by viral load side by side for all modules
+```{r}
+combined_module_expression_and_viral_load_plot_all_modules_list <- list() 
+for(mod_ in unique(dat.module_w_meta$Module)){
+Modules_from_Manuscript_by_viralload_temp <- dat.module_w_meta_wo_none_none %>% subset(Module == mod_) %>% ggplot(aes(x=log10viral_load,y=moduleExp)) + geom_point(aes(color = Treatment),size=3,alpha=0.8) + geom_smooth(method = "lm") +
+  scale_color_manual(values = Treatment_col) + xlab("Viral Copy Number (log10)") + ylab("Mean Expression (log2)")+ theme_classic() + theme(legend.position = "none",text = element_text(size = 15), 
+          axis.title = element_text(size = 18))
+
+Modules_from_Manuscript_by_Treatment_temp<- ggplot(dat.module_w_meta %>% subset(Module == mod_), 
+         aes(x = Treatment, y = moduleExp, color = Treatment, 
+             fill = Treatment)) +
+    #geom_jitter(size = 3, width = 0.2, height = 0, alpha = 0.8) +
+    geom_point(size = 3,alpha = 0.8)+
+    geom_line(aes(group = donorId), color = "gray70", alpha = 0.5,linetype=2) +
+    stat_summary(fun.data = iqr, linewidth = 1, geom = "errorbar", width = 0.3) + 
+    stat_summary(fun = mean, fun.min = mean, fun.max = mean,
+                 geom = "crossbar", width = 0.5) +
+    theme_classic() +
+    theme(#legend.position = "none", 
+          #axis.text.x = element_text(angle = 45, hjust = 1), 
+          text = element_text(size = 15), 
+          axis.title = element_text(size = 18)) +
+    scale_fill_manual(values = Treatment_col) + scale_color_manual(values = Treatment_col) +
+    ylab("Mean Expression (log2)") + ggtitle(mod_) + xlab("")
+
+combined_module_expression_and_viral_load_plot_all_modules_list[[mod_]] <- Modules_from_Manuscript_by_Treatment_temp + Modules_from_Manuscript_by_viralload_temp  + plot_layout(ncol = 2,guides = "collect",axis_titles = "collect",widths = c(0.60,0.35,0.05))
+}
+```
+
+

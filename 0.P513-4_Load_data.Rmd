@@ -1,0 +1,176 @@
+---
+title: "P513-4 : Dysregulated asthmatic epithelial interferon responses to viruses drive exacerbation, T2 inflammation, and airway remodeling"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 5
+    df_print: paged
+editor_options: 
+  chunk_output_type: console
+---
+
+<style type="text/css">
+body{ /* Normal  */
+      font-size: 14px;
+  }
+h1 { /* Header 1 */
+  font-size: 28px;
+}
+h2 { /* Header 2 */
+    font-size: 24px;
+}
+h3 { /* Header 3 */
+  font-size: 20px;
+}
+h4 { /* Header 4 */
+  font-size: 16px;
+}
+</style>
+
+# Project Summary
+
+Need to fill
+
+
+The primary questions are\
+Need to fill
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE}
+library(knitr)
+library(kableExtra)
+library(tidyverse)
+library(bRi)
+library(miscHelpers)
+library(RNAseQC)
+library(countSubsetNorm)
+library(apird)
+library(magrittr)
+
+select <- dplyr::select
+rename <- dplyr::rename
+filter <- dplyr::filter
+distinct <- dplyr::distinct
+mutate <- dplyr::mutate
+
+opts_chunk$set(
+  fig.width=6, fig.height=4.25, cache = TRUE,
+  echo=FALSE, warning=FALSE, message=FALSE)
+options(stringsAsFactors = FALSE)
+
+theme_set(
+  theme_bw(20) +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_rect(colour="black", fill = NA, size = 1),
+          axis.text = element_text(colour="black"),
+          axis.ticks = element_line(colour="black"),
+          axis.text.x = element_text(angle=0)))
+update_geom_defaults("point", list(shape=16))
+grDevices::pdf.options(useDingbats = FALSE)
+options(ggrepel.max.overlaps = Inf)
+#Create 'not in' operator
+`%notin%` <- Negate(`%in%`)
+# test_plot <- ggplot2::ggplot(mapping = ggplot2::aes(x = 1:10, y = 1:10)) + ggplot2::geom_point()
+# ggplot(mapping = aes(x = 1:10, y = 1:10)) + geom_point()
+
+```
+
+
+```{r setFilenamesAndGlobalVariables}
+projectNumber <- "P513-4"
+dirBoxBase <- 
+  file.path("~", "Library", "CloudStorage", "Box-Box")
+dirRoot <-
+  file.path(
+    dirBoxBase, "Altman_Lab", # Box version
+    # "~", "Documents", "Projects_local", # local version
+    projectNumber)
+dirPlots <- file.path("Figs")
+dirresults <- file.path("Results")
+dirDataclean <- file.path("Data_clean")
+dirDataraw <- file.path("Data_raw")
+#dataDate <- "2022-09-22"
+
+#filenameSuffix <- paste0("P441_SLP_TruCulture_analysis_1.", dataDate)
+
+
+```
+
+
+```{r set_directory, cache=FALSE}
+if (!dir.exists(dirPlots)) dir.create(dirPlots)
+if (!dir.exists(dirresults)) dir.create(dirresults)
+if (!dir.exists(dirDataclean)) dir.create(dirDataclean)
+if (!dir.exists(dirDataraw)) dir.create(dirDataraw)
+```
+
+
+
+
+```{r}
+projectInfo <- apird::getGcqProjectInfo(projectNumber)
+Project_libs <- apird::getProjectLibs(projectNumber)
+Project_anno <- apird::getAnno(Project_libs)
+Project_metrics <- apird::getMetrics(Project_libs)
+Project_counts <- apird::getGeneCounts(Project_libs) %>% t()
+
+counts_raw <- as.data.frame(Project_counts) %>% rownames_to_column("geneName")
+names_counts <- sub("_2227GLKNX", "",names(counts_raw)) %>% sub("_2227GLKNX","", .)
+
+counts <- counts_raw %>% setNames(names_counts)
+#lib_fc <- getLibIdsWithFcIds(P506_1_libs)
+design <- left_join(Project_anno,Project_metrics) 
+
+# Samples by Groups of Interest
+design %>% 
+  count(studyGroup,treatment,stimulation,timePoint) %>%
+
+kable(align="l",
+      caption="Total libraries") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+design %>% 
+  count(donorId,studyGroup,treatment,stimulation,timePoint) %>%
+
+kable(align="l",
+      caption="Total libraries") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+```
+
+#Get the meta data
+```{r}
+meta_IFN <-read_csv("Data_raw/IFN_treatment_experiment_meta.csv")
+IFN_exp_viral_load <- read_csv("Data_raw/IFN_treatment_experiment_viral_load.csv") %>% mutate(Treatment = str_remove(`Sample Name`, paste0("^", donorId, " "))) %>% select(-c(`Sample Name`)) %>% 
+  mutate(Treatment = ifelse(Treatment == "RV16", "None + RV16", Treatment)) %>%
+  separate(Treatment, into = c("treatment", "stimulation"), sep = " \\+ ", fill = "right")
+
+extra_rows <- IFN_exp_viral_load %>%
+  select(donorId) %>%
+  distinct() %>%
+  mutate(
+    `RV16 Copy Number Mean` = 1,
+    treatment = c("None"),
+    stimulation = c("None")
+  )
+
+IFN_exp_viral_load_w_meta <- IFN_exp_viral_load %>% rbind(extra_rows) %>% left_join(meta_IFN)%>% 
+  mutate(Exacerbation = ifelse(`History Severe Exacerbation` == "Yes","Severe Exacerbation",ifelse(`History Severe Exacerbation` == "No","No Severe Exacerbation",`History Severe Exacerbation`)))%>% 
+  mutate(Treatment = paste(treatment,stimulation,sep = " + ")) %>% 
+  mutate(Treatment = factor(Treatment,c("None + None","None + RV16","CXCL10 + RV16", "IFNb + RV16"))) %>% 
+  mutate(treatment = factor(treatment,levels=c("None","CXCL10","IFNb"))) %>% 
+  mutate(stimulation = factor(stimulation,levels = c("None","RV16"))) %>% 
+  mutate(Exacerbation = factor(Exacerbation,levels=c("No Severe Exacerbation","Severe Exacerbation")))
+
+design_w_viral <- design %>% left_join(IFN_exp_viral_load_w_meta)
+```
+
+Save the Data
+```{r}
+write_csv(counts,"Data_raw/counts_raw.csv")
+write_csv(design_w_viral,"Data_raw/design_raw.csv")
+
+```
+
+
+
